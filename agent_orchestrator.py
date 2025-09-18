@@ -1,49 +1,39 @@
 ﻿from __future__ import annotations
 import json, os, re
 from typing import Any, Dict, List, Tuple
-
 from openai import OpenAI
 
-# Use OPENAI_API_KEY from env; fail clearly if missing
+# pull helpers from chat_api (catalog + embeddings + filters)
+from chat_api import _load_products, _embed_text, _cosine_topk, _apply_filters
+
 def _load_openai_client() -> OpenAI:
     raw = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_APIKEY") or ""
     key = raw.strip()
     if not key.startswith("sk-"):
         head = (key[:6] + "…") if key else "<empty>"
-        raise RuntimeError(
-            f"OPENAI_API_KEY not set or malformed (got: {head}). "
-            "Set it in your Render service → Environment."
-        )
+        raise RuntimeError(f"OPENAI_API_KEY not set or malformed (got: {head}).")
     print(f"[openai] using key: {key[:8]}…{key[-6:]}")
     return OpenAI(api_key=key)
 
 client = _load_openai_client()
 
-# Pull catalog helpers from chat_api
-from chat_api import _load_products, _embed_text, _cosine_topk, _apply_filters
+SYSTEM_PROMPT = """You are StyleSnap — a friendly assistant who can also help with fashion.
+Keep replies short (1–4 sentences). Only search products when the user clearly wants items."""
 
-SYSTEM_PROMPT = """You are StyleSnap — a friendly general assistant who can also help with fashion.
-- Keep replies short (1–4 sentences), specific, and human.
-- Only search products when the user clearly wants items (outfits/brands/links/photos).
-- If you searched, summarize results in plain language first, then list a few best picks."""
-
+# -------- simple keyword fallback (works when ML embeddings are off) --------
 def _simple_keyword_search(query: str, top_k: int, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Fallback when ML embeddings are disabled. Very simple title/brand match."""
     arr, items = _load_products()
     q = (query or "").lower().strip()
     if not q or not items:
         return []
-
-    tokens = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+    toks = [t for t in re.split(r"[^a-z0-9]+", q) if t]
     def score(it):
         s = 0
         text = f"{(it.get('title') or '').lower()} {(it.get('brand') or '').lower()}"
-        for t in tokens:
+        for t in toks:
             if t in text: s += 1
         return s
-
     ranked = sorted(items, key=score, reverse=True)
-    # Light filter application using existing util
     ranked = _apply_filters(ranked[:max(top_k*5, top_k)], [1.0]*max(top_k*5, top_k), filters)[:top_k]
     return ranked
 
@@ -51,14 +41,14 @@ def tool_search_similar(query: str, top_k: int = 8, filters: Dict[str, Any] | No
     filters = filters or {}
     arr, items = _load_products()
 
-    # Try embedding route
+    # try embeddings first
     q = _embed_text(query or "")
     if q is not None and getattr(arr, "size", 0):
         idxs, sims = _cosine_topk(q, arr, k=max(top_k*3, top_k))
         cands = [items[i] for i in idxs]
         return _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
 
-    # Fallback if ML disabled / no embeddings
+    # fallback if ML disabled / no vectors
     return _simple_keyword_search(query or "", top_k, filters)
 
 def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | None = None):
@@ -76,7 +66,7 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
         "type": "function",
         "function": {
             "name": "search_similar",
-            "description": "Semantic/keyword search over the product catalog.",
+            "description": "Search the product catalog (semantic if enabled; keyword fallback otherwise).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -90,6 +80,8 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
     }]
 
     sys = {"role": "system", "content": SYSTEM_PROMPT}
+
+    # First pass: decide whether to call the tool
     r1 = llm_complete([sys, *messages], tools=tools)
     choice = r1.choices[0]
     msg = getattr(choice, "message", None)
@@ -98,6 +90,7 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
         text = (getattr(msg, "content", None) or getattr(choice, "text", None) or "Got it.").strip()
         return text, []
 
+    # Handle tool calls
     tool_calls = msg.tool_calls or []
     items: List[Dict[str, Any]] = []
     follow_messages: List[Dict[str, str]] = [sys, *messages]
@@ -122,11 +115,13 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
                 if not q:
                     last_user = next((m["content"] for m in reversed(messages) if m.get("role")=="user" and m.get("content")), "")
                     q = last_user.strip()
+
                 try:
                     items = tool_search_similar(q, top_k=top_k, filters=filters) or []
                 except Exception as e:
                     print("[agent] tool_search_similar failed:", repr(e))
                     items = []
+
                 tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
                 follow_messages.append({
                     "role": "tool",
@@ -137,6 +132,7 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
         except Exception as e:
             print("[agent] tool_call handler error:", repr(e))
 
+    # Second pass: verbalize results
     try:
         r2 = llm_complete(follow_messages, tools=None)
         text = (r2.choices[0].message.content or "Here are some ideas.").strip()
