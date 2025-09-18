@@ -1,4 +1,4 @@
-# chat_api.py — CLIP search (lazy init) + Firestore (lazy init) + robust fallbacks
+﻿# chat_api.py — CLIP search (lazy init) + Firestore (lazy init) + robust fallbacks
 from __future__ import annotations
 import base64, io, os, time, json
 from typing import Any, Dict, List, Tuple
@@ -7,8 +7,29 @@ import numpy as np
 from PIL import Image
 from flask import Blueprint, request, jsonify
 
-import torch
-from transformers import CLIPModel, CLIPProcessor
+# ---------------- ML optional (Torch/Transformers) ----------------
+# Turn on by setting ENABLE_ML=1 in your environment (Render Settings → Environment)
+ENABLE_ML = os.getenv("ENABLE_ML", "0") == "1"
+
+# Flags & placeholders
+_ML_AVAILABLE = False
+_ML_ERROR: Exception | None = None
+torch = None  # type: ignore
+CLIPModel = None  # type: ignore
+CLIPProcessor = None  # type: ignore
+_DEVICE = None
+
+if ENABLE_ML:
+    try:
+        import torch  # type: ignore
+        from transformers import CLIPModel as _CLIPModel, CLIPProcessor as _CLIPProcessor  # type: ignore
+        CLIPModel = _CLIPModel
+        CLIPProcessor = _CLIPProcessor
+        _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _ML_AVAILABLE = True
+    except Exception as e:
+        _ML_AVAILABLE = False
+        _ML_ERROR = e
 
 # ---------------- Firebase (lazy) ----------------
 _db = None
@@ -47,40 +68,44 @@ def _product_collection():
     return db.collection("app").document("products").collection("items")
 
 # ---------------- CLIP (lazy) ----------------
-_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _MODEL_ID = "openai/clip-vit-base-patch32"  # 512-dim
-_clip_model: CLIPModel | None = None
-_clip_proc: CLIPProcessor | None = None
+_clip_model = None
+_clip_proc = None
 
 def _ensure_clip():
+    if not _ML_AVAILABLE:
+        raise RuntimeError("ML features are disabled on this deployment")
     global _clip_model, _clip_proc
     if _clip_model is None or _clip_proc is None:
-        _clip_model = CLIPModel.from_pretrained(_MODEL_ID).to(_DEVICE).eval()
-        _clip_proc  = CLIPProcessor.from_pretrained(_MODEL_ID)
+        # Types ignored because we may run with ML disabled (placeholders above)
+        _clip_model = CLIPModel.from_pretrained(_MODEL_ID).to(_DEVICE).eval()  # type: ignore
+        _clip_proc  = CLIPProcessor.from_pretrained(_MODEL_ID)  # type: ignore
 
 def _embed_text(text: str) -> np.ndarray | None:
-    if not text or not text.strip():
+    if not _ML_AVAILABLE or not text or not text.strip():
         return None
     _ensure_clip()
     ins = _clip_proc(text=[text], return_tensors="pt", padding=True, truncation=True)  # type: ignore
-    ins = {k: v.to(_DEVICE) for k, v in ins.items()}
-    with torch.no_grad():
+    ins = {k: v.to(_DEVICE) for k, v in ins.items()}  # type: ignore
+    with torch.no_grad():  # type: ignore
         z = _clip_model.get_text_features(**ins)  # type: ignore
-    z = z / z.norm(p=2, dim=-1, keepdim=True)
-    return z.squeeze(0).detach().cpu().numpy().astype("float32")
+    z = z / z.norm(p=2, dim=-1, keepdim=True)  # type: ignore
+    return z.squeeze(0).detach().cpu().numpy().astype("float32")  # type: ignore
 
 def _embed_image_b64(img_b64: str) -> np.ndarray | None:
+    if not _ML_AVAILABLE or not img_b64:
+        return None
     try:
         pil = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert("RGB")
     except Exception:
         return None
     _ensure_clip()
     ins = _clip_proc(images=[pil], return_tensors="pt")  # type: ignore
-    ins = {k: v.to(_DEVICE) for k, v in ins.items()}
-    with torch.no_grad():
+    ins = {k: v.to(_DEVICE) for k, v in ins.items()}  # type: ignore
+    with torch.no_grad():  # type: ignore
         z = _clip_model.get_image_features(**ins)  # type: ignore
-    z = z / z.norm(p=2, dim=-1, keepdim=True)
-    return z.squeeze(0).detach().cpu().numpy().astype("float32")
+    z = z / z.norm(p=2, dim=-1, keepdim=True)  # type: ignore
+    return z.squeeze(0).detach().cpu().numpy().astype("float32")  # type: ignore
 
 # ---------------- Cache: products + embeddings ----------------
 _CACHE = {"ts": 0.0, "arr": np.zeros((0,512), dtype="float32"), "items": []}
@@ -177,12 +202,19 @@ def _get_ref_embedding(ref_id: str) -> np.ndarray | None:
 
 bp = Blueprint("chat_api", __name__)
 
+def _ml_disabled_response():
+    msg = "Semantic search is temporarily disabled on this server."
+    hint = "Ask the team to enable ENABLE_ML=1 and deploy with Torch/Transformers."
+    return jsonify({"ok": False, "reply": msg, "items": [], "error": "ml_disabled", "hint": hint}), 503
+
 @bp.route("/ping")
 def ping():
-    return {"ok": True}
+    return {"ok": True, "ml": _ML_AVAILABLE, "ml_error": str(_ML_ERROR) if _ML_ERROR else None}
 
 @bp.route("/chat", methods=["POST"])
 def chat_text_only():
+    if not _ML_AVAILABLE:
+        return _ml_disabled_response()
     data = request.get_json(force=True) or {}
     msg = (data.get("message") or "").strip()
     top_k = int(data.get("top_k") or 8)
@@ -210,6 +242,9 @@ def chat_messages():
       "filters": {"max_price": 40, "colors": ["blue"], "brand": "hm"}
     }
     """
+    if not _ML_AVAILABLE:
+        return _ml_disabled_response()
+
     data = request.get_json(force=True) or {}
     text = (data.get("message") or "").strip()
     img_b64 = data.get("image_base64")
@@ -259,7 +294,7 @@ def chat_messages():
     if filters.get("max_price") is not None:
         try:
             looked += f' under ${float(filters["max_price"]):.0f}'
-        except:  # keep it robust
+        except:
             pass
     if filters.get("colors"):
         looked += f' favoring {", ".join(filters["colors"])}'
