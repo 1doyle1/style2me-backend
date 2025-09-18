@@ -2,10 +2,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Your existing API (chat, ping, etc.)
-from chat_api import bp as chat_bp
+from chat_api import bp as chat_bp  # your existing endpoints
 
-# Try to import the agent; don’t crash if it’s missing
 try:
     from agent_orchestrator import run as agent_run
     HAS_AGENT = True
@@ -17,40 +15,25 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# Register existing blueprint endpoints (/chat, /chat/messages, /ping, etc.)
 app.register_blueprint(chat_bp)
 
 @app.get("/")
 def root():
-    return {
-        "ok": True,
-        "service": "style2me-backend",
-        "agent": HAS_AGENT,
-        "agent_error": AGENT_ERR,
-    }
+    return {"ok": True, "service": "style2me-backend", "agent": HAS_AGENT, "agent_error": AGENT_ERR}
 
 @app.route("/agent/chat", methods=["POST", "OPTIONS"])
 def agent_chat():
-    # Preflight
     if request.method == "OPTIONS":
         return ("", 204)
-
     if not HAS_AGENT:
-        return jsonify({
-            "ok": False,
-            "error": "agent_unavailable",
-            "hint": AGENT_ERR or "agent_orchestrator.py not imported"
-        }), 503
-
+        return jsonify({"ok": False, "error": "agent_unavailable", "hint": AGENT_ERR}), 503
     data = request.get_json(force=True) or {}
     messages = data.get("messages")
-
     if not messages:
         msg = (data.get("message") or "").strip()
         if not msg:
             return jsonify({"ok": False, "error": "no_input"}), 400
         messages = [{"role": "user", "content": msg}]
-
     try:
         reply, items = agent_run(messages)
         return jsonify({"ok": True, "reply": reply, "items": items})
