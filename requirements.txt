@@ -1,14 +1,13 @@
-﻿# Web
-Flask==3.1.0
+﻿Flask==3.1.0
 flask-cors==5.0.1
 
-# Firebase / Firestore
 firebase-admin==6.3.0
 google-cloud-firestore==2.16.0
 
-# Utils
 numpy==1.26.4
 pillow==9.5.0
 
-# Production WSGI server
+# OpenAI SDK for agent_orchestrator.py
+openai>=1.0.0,<2.0.0
+
 gunicorn==23.0.0
