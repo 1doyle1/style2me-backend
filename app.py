@@ -1,4 +1,4 @@
-﻿import os
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -32,6 +32,7 @@ def agent_chat():
         return ("", 204)
 
     if not HAS_AGENT:
+        print("[/agent/chat] agent not available:", AGENT_ERR, flush=True)
         return jsonify({"ok": False, "error": "agent_unavailable", "hint": AGENT_ERR}), 503
 
     data = request.get_json(force=True) or {}
@@ -39,14 +40,23 @@ def agent_chat():
     if not messages:
         msg = (data.get("message") or "").strip()
         if not msg:
+            print("[/agent/chat] no input provided", flush=True)
             return jsonify({"ok": False, "error": "no_input"}), 400
         messages = [{"role": "user", "content": msg}]
 
     try:
+        print("[/agent/chat] incoming messages:", messages, flush=True)
         reply, items = agent_run(messages)
+        print("[/agent/chat] reply:", reply[:200] if isinstance(reply, str) else reply, flush=True)
+        print(f"[/agent/chat] items returned: {len(items)}", flush=True)
         return jsonify({"ok": True, "reply": reply, "items": items})
     except Exception as e:
+        import traceback
+        print("[/agent/chat] ERROR:", repr(e), flush=True)
+        traceback.print_exc()
         return jsonify({"ok": False, "error": "agent_error", "detail": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
+

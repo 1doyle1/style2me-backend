@@ -37,28 +37,49 @@ _db_err: Exception | None = None
 
 def get_db():
     """
-    Lazily initialize Firestore so the app doesn't crash at import time if
-    GOOGLE_APPLICATION_CREDENTIALS isn't set yet.
+    Initialize Firestore from one of:
+      1) FIREBASE_KEY = inline JSON (recommended on Railway)
+      2) FIREBASE_KEY = file path to JSON
+      3) GOOGLE_APPLICATION_CREDENTIALS = file path to JSON
     """
     global _db, _db_err
     if _db is not None or _db_err is not None:
         return _db
 
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
 
-        if not cred_path or not os.path.exists(cred_path):
-            raise RuntimeError("Set GOOGLE_APPLICATION_CREDENTIALS to your service account JSON")
+        raw = os.getenv("FIREBASE_KEY", "").strip()
+        cred = None
+
+        if raw:
+            # If looks like JSON, parse; otherwise treat as a path
+            if raw.startswith("{"):
+                data = json.loads(raw)
+                cred = credentials.Certificate(data)
+            else:
+                if not os.path.exists(raw):
+                    raise RuntimeError(f"FIREBASE_KEY path not found: {raw}")
+                cred = credentials.Certificate(raw)
+        else:
+            # Fallback to GOOGLE_APPLICATION_CREDENTIALS path
+            gac = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            if not gac or not os.path.exists(gac):
+                raise RuntimeError("FIREBASE_KEY not set, and GOOGLE_APPLICATION_CREDENTIALS missing or not found")
+            cred = credentials.Certificate(gac)
 
         if not firebase_admin._apps:
-            firebase_admin.initialize_app(credentials.Certificate(cred_path))
+            firebase_admin.initialize_app(cred)
+
         _db = firestore.client()
         return _db
+
     except Exception as e:
         _db_err = e
         return None
+
+
 
 def _product_collection():
     db = get_db()
@@ -213,8 +234,33 @@ def ping():
 
 @bp.route("/chat", methods=["POST"])
 def chat_text_only():
+    data = request.get_json(force=True) or {}
+    msg = (data.get("message") or "").strip()
+
+    # If ML is unavailable, still try Firestore
     if not _ML_AVAILABLE:
-        return _ml_disabled_response()
+        arr, items = _load_products()
+        if not items:
+            return jsonify({"reply": "Database not ready (or empty).", "items": []}), 503
+        return jsonify({
+            "reply": f"ML is off, but I looked for '{msg}' and here are some products.",
+            "items": items[:5]   # just return a few
+        })
+
+    # Normal ML path
+    top_k = int(data.get("top_k") or 8)
+    filters = data.get("filters") or {}
+    if not msg:
+        return jsonify({"reply":"Tell me what you’re looking for.", "items":[]})
+    arr, items = _load_products()
+    if not getattr(arr, "size", 0):
+        return jsonify({"reply":"Database not ready yet—try again in a moment.", "items":[]}), 503
+    q = _embed_text(msg)
+    idxs, sims = _cosine_topk(q, arr, k=max(top_k*3, top_k))
+    cands = [items[i] for i in idxs]
+    ranked = _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
+    return jsonify({"reply": f'I looked for: “{msg}”.', "items": ranked})
+
     data = request.get_json(force=True) or {}
     msg = (data.get("message") or "").strip()
     top_k = int(data.get("top_k") or 8)
