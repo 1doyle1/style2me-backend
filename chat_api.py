@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 from PIL import Image
 from flask import Blueprint, request, jsonify
+from runpod_client import run_query
 
 # ---------------- ML optional (Torch/Transformers) ----------------
 # Turn on by setting ENABLE_ML=1 in your environment (Render Settings → Environment)
@@ -223,10 +224,21 @@ def _get_ref_embedding(ref_id: str) -> np.ndarray | None:
 
 bp = Blueprint("chat_api", __name__)
 
+from runpod_client import run_query
+
+
 def _ml_disabled_response():
-    msg = "Semantic search is temporarily disabled on this server."
-    hint = "Ask the team to enable ENABLE_ML=1 and deploy with Torch/Transformers."
-    return jsonify({"ok": False, "reply": msg, "items": [], "error": "ml_disabled", "hint": hint}), 503
+    data = request.get_json(force=True) or {}
+    try:
+        result = run_query(data)
+        return jsonify({
+            "ok": True,
+            "reply": result.get("reply") or "Here are some ideas.",
+            "items": result.get("items") or []
+        })
+    except Exception as e:
+        msg = "Semantic search is temporarily disabled and RunPod call failed."
+        return jsonify({"ok": False, "reply": msg, "items": [], "error": str(e)}), 503
 
 @bp.route("/ping")
 def ping():
@@ -237,15 +249,9 @@ def chat_text_only():
     data = request.get_json(force=True) or {}
     msg = (data.get("message") or "").strip()
 
-    # If ML is unavailable, still try Firestore
     if not _ML_AVAILABLE:
-        arr, items = _load_products()
-        if not items:
-            return jsonify({"reply": "Database not ready (or empty).", "items": []}), 503
-        return jsonify({
-            "reply": f"ML is off, but I looked for '{msg}' and here are some products.",
-            "items": items[:5]   # just return a few
-        })
+        return _ml_disabled_response()
+
 
     # Normal ML path
     top_k = int(data.get("top_k") or 8)
