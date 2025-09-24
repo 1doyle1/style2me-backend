@@ -139,7 +139,6 @@ def _load_products() -> Tuple[np.ndarray, List[Dict[str, Any]]]:
 
     col = _product_collection()
     if col is None:
-        # DB not ready -> empty arrays (handler will 503)
         _CACHE.update({"ts": now, "arr": np.zeros((0,512), dtype="float32"), "items": []})
         return _CACHE["arr"], _CACHE["items"]
 
@@ -147,18 +146,20 @@ def _load_products() -> Tuple[np.ndarray, List[Dict[str, Any]]]:
     items, vecs = [], []
     for d in docs:
         x = d.to_dict() or {}
-        emb = x.get("clip_embedding") or []
+        item = {
+            "id": x.get("id") or d.id,
+            "title": x.get("title") or "",
+            "brand": x.get("brand") or "",
+            "price_text": x.get("price_text") or x.get("price") or "",
+            "product_url": x.get("product_url") or x.get("url") or "",
+            "image_url": x.get("image_url") or x.get("cropped_image_url") or "",
+            "color_distribution": x.get("color_distribution") or {},
+            "traits": x.get("traits") or {},
+        }
+        items.append(item)
+
+        emb = x.get("clip_embedding")
         if isinstance(emb, list) and len(emb) == 512:
-            items.append({
-                "id": x.get("id") or d.id,
-                "title": x.get("title") or "",
-                "brand": x.get("brand") or "",
-                "price_text": x.get("price_text") or x.get("price") or "",
-                "product_url": x.get("product_url") or x.get("url") or "",
-                "image_url": x.get("image_url") or x.get("cropped_image_url") or "",
-                "color_distribution": x.get("color_distribution") or {},
-                "traits": x.get("traits") or {},
-            })
             vecs.append(emb)
 
     arr = np.asarray(vecs, dtype="float32")
@@ -168,6 +169,7 @@ def _load_products() -> Tuple[np.ndarray, List[Dict[str, Any]]]:
 
     _CACHE.update({"ts": now, "arr": arr, "items": items})
     return arr, items
+
 
 def _cosine_topk(q: np.ndarray | None, arr: np.ndarray, k: int = 10):
     if arr is None or arr.size == 0 or q is None:

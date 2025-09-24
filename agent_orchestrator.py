@@ -21,22 +21,6 @@ SYSTEM_PROMPT = """You are StyleSnap — a friendly assistant who can also help 
 Keep replies short (1–4 sentences). Only search products when the user clearly wants items."""
 
 # -------- simple keyword fallback (works when ML embeddings are off) --------
-def _simple_keyword_search(query: str, top_k: int, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    arr, items = _load_products()
-    q = (query or "").lower().strip()
-    if not q or not items:
-        return []
-    toks = [t for t in re.split(r"[^a-z0-9]+", q) if t]
-    def score(it):
-        s = 0
-        text = f"{(it.get('title') or '').lower()} {(it.get('brand') or '').lower()}"
-        for t in toks:
-            if t in text: 
-                s += 1
-        return s
-    ranked = sorted(items, key=score, reverse=True)
-    ranked = _apply_filters(ranked[:max(top_k*5, top_k)], [1.0]*max(top_k*5, top_k), filters)[:top_k]
-    return ranked
 def _simple_keyword_search(query: str, items: List[Dict[str, Any]], top_k: int, filters: Dict[str, Any]):
     q = (query or "").lower().strip()
     if not q or not items:
@@ -65,7 +49,7 @@ def tool_search_similar(query: str, top_k: int = 8, filters: Dict[str, Any] | No
         cands = [items[i] for i in idxs]
         return _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
 
-    # Fallback when ML is disabled or no vectors: keyword search
+    # Fallback when ML is disabled / no vectors
     return _simple_keyword_search(query or "", items, top_k, filters)
 
 def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | None = None):
@@ -80,7 +64,6 @@ def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | N
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
     return client.chat.completions.create(**kwargs)
-
 
 def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
     tools = [{
