@@ -37,21 +37,6 @@ if ENABLE_ML:
 # ---------------- Firebase (lazy) ----------------
 _db = None
 _db_err: Exception | None = None
-@bp.route("/debug/products", methods=["GET"])
-def debug_products():
-    try:
-        from time import time
-        t0 = time()
-        arr, items = _load_products()
-        return {
-            "ok": True,
-            "count_items": len(items),
-            "count_embeddings": int(arr.shape[0]) if getattr(arr, "size", 0) else 0,
-            "sample": items[:3],
-            "ms": int((time() - t0) * 1000),
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
 
 def get_db():
     """
@@ -284,6 +269,21 @@ def _ml_disabled_response():
     except Exception as e:
         msg = "Semantic search is temporarily disabled and RunPod call failed."
         return jsonify({"ok": False, "reply": msg, "items": [], "error": str(e)}), 503
+@bp.route("/debug/products", methods=["GET"])
+def debug_products():
+    try:
+        from time import time
+        t0 = time()
+        arr, items = _load_products()
+        return {
+            "ok": True,
+            "count_items": len(items),
+            "count_embeddings": int(arr.shape[0]) if getattr(arr, "size", 0) else 0,
+            "sample": items[:3],
+            "ms": int((time() - t0) * 1000),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
 
 @bp.route("/ping")
 def ping():
