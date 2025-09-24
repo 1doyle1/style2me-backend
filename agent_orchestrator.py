@@ -12,7 +12,7 @@ def _load_openai_client() -> OpenAI:
     if not key.startswith("sk-"):
         head = (key[:6] + "…") if key else "<empty>"
         raise RuntimeError(f"OPENAI_API_KEY not set or malformed (got: {head}).")
-    print(f"[openai] using key: {key[:8]}…{key[-6:]}", flush=True)
+    print(f"[openai] using key: {key[:8]}…{key[-6:]}")
     return OpenAI(api_key=key)
 
 client = _load_openai_client()
@@ -30,11 +30,9 @@ def _simple_keyword_search(query: str, items: List[Dict[str, Any]], top_k: int, 
         s = 0
         text = f"{(it.get('title') or '').lower()} {(it.get('brand') or '').lower()}"
         for t in toks:
-            if t in text:
-                s += 1
+            if t in text: s += 1
         return s
     ranked = sorted(items, key=score, reverse=True)
-    # Reuse the same filter/boost pipeline
     ranked = _apply_filters(ranked[:max(top_k*5, top_k)], [1.0]*max(top_k*5, top_k), filters)[:top_k]
     return ranked
 
@@ -42,14 +40,14 @@ def tool_search_similar(query: str, top_k: int = 8, filters: Dict[str, Any] | No
     filters = filters or {}
     arr, items = _load_products()
 
-    # Try semantic search first
-    qvec = _embed_text(query or "")
-    if qvec is not None and getattr(arr, "size", 0):
-        idxs, sims = _cosine_topk(qvec, arr, k=max(top_k * 3, top_k))
+    # try embeddings first
+    q = _embed_text(query or "")
+    if q is not None and getattr(arr, "size", 0):
+        idxs, sims = _cosine_topk(q, arr, k=max(top_k*3, top_k))
         cands = [items[i] for i in idxs]
         return _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
 
-    # Fallback when ML is disabled / no vectors
+    # fallback if ML disabled / no vectors
     return _simple_keyword_search(query or "", items, top_k, filters)
 
 def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | None = None):
@@ -59,7 +57,6 @@ def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | N
         "temperature": 0.5,
         "messages": messages,
     }
-    # Only include tool params when tools are actually provided
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
@@ -86,14 +83,12 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
     sys = {"role": "system", "content": SYSTEM_PROMPT}
 
     # First pass: decide whether to call the tool
-    print("[run] starting first pass with messages:", messages, flush=True)
     r1 = llm_complete([sys, *messages], tools=tools)
     choice = r1.choices[0]
     msg = getattr(choice, "message", None)
 
     if not msg or getattr(msg, "tool_calls", None) in (None, []):
         text = (getattr(msg, "content", None) or getattr(choice, "text", None) or "Got it.").strip()
-        print("[run] no tool calls, reply:", text, flush=True)
         return text, []
 
     # Handle tool calls
@@ -124,28 +119,27 @@ def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
 
                 try:
                     items = tool_search_similar(q, top_k=top_k, filters=filters) or []
-                    print(f"[run] tool_search_similar query='{q}' → {len(items)} items", flush=True)
                 except Exception as e:
-                    print("[run] tool_search_similar failed:", repr(e), flush=True)
+                    print("[agent] tool_search_similar failed:", repr(e))
                     items = []
 
-                tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
-                follow_messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": "search_similar",
-                    "content": json.dumps(tool_payload, default=str)
-                })
+                # ✅ Only append tool message if call.id exists
+                if getattr(call, "id", None):
+                    tool_payload = {"ok": True, "query": q, "count": len(items), "items": items}
+                    follow_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": "search_similar",
+                        "content": json.dumps(tool_payload, default=str)
+                    })
         except Exception as e:
-            print("[run] tool_call handler error:", repr(e), flush=True)
+            print("[agent] tool_call handler error:", repr(e))
 
     # Second pass: verbalize results
     try:
-        print("[run] starting second pass", flush=True)
         r2 = llm_complete(follow_messages, tools=None)
         text = (r2.choices[0].message.content or "Here are some ideas.").strip()
-        print("[run] final reply:", text, flush=True)
     except Exception as e:
-        print("[run] second completion failed:", repr(e), flush=True)
+        print("[agent] second completion failed:", repr(e))
         text = "Here are some ideas."
     return text, items
