@@ -37,35 +37,50 @@ def _simple_keyword_search(query: str, top_k: int, filters: Dict[str, Any]) -> L
     ranked = sorted(items, key=score, reverse=True)
     ranked = _apply_filters(ranked[:max(top_k*5, top_k)], [1.0]*max(top_k*5, top_k), filters)[:top_k]
     return ranked
+def _simple_keyword_search(query: str, items: List[Dict[str, Any]], top_k: int, filters: Dict[str, Any]):
+    q = (query or "").lower().strip()
+    if not q or not items:
+        return []
+    toks = [t for t in re.split(r"[^a-z0-9]+", q) if t]
+    def score(it):
+        s = 0
+        text = f"{(it.get('title') or '').lower()} {(it.get('brand') or '').lower()}"
+        for t in toks:
+            if t in text:
+                s += 1
+        return s
+    ranked = sorted(items, key=score, reverse=True)
+    # Reuse the same filter/boost pipeline
+    ranked = _apply_filters(ranked[:max(top_k*5, top_k)], [1.0]*max(top_k*5, top_k), filters)[:top_k]
+    return ranked
 
 def tool_search_similar(query: str, top_k: int = 8, filters: Dict[str, Any] | None = None):
     filters = filters or {}
     arr, items = _load_products()
 
-    # try embeddings first
-    q = _embed_text(query or "")
-    if q is not None and getattr(arr, "size", 0):
-        idxs, sims = _cosine_topk(q, arr, k=max(top_k*3, top_k))
+    # Try semantic search first
+    qvec = _embed_text(query or "")
+    if qvec is not None and getattr(arr, "size", 0):
+        idxs, sims = _cosine_topk(qvec, arr, k=max(top_k * 3, top_k))
         cands = [items[i] for i in idxs]
         return _apply_filters(cands, [float(s) for s in sims], filters)[:top_k]
 
-    # fallback if ML disabled / no vectors
-    return _simple_keyword_search(query or "", top_k, filters)
+    # Fallback when ML is disabled or no vectors: keyword search
+    return _simple_keyword_search(query or "", items, top_k, filters)
 
 def llm_complete(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] | None = None):
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    try:
-        print("[llm_complete] model:", model, "messages:", messages, flush=True)
-        return client.chat.completions.create(
-            model=model,
-            temperature=0.5,
-            messages=messages,
-            tools=tools or None,
-            tool_choice="auto" if tools else "none",
-        )
-    except Exception as e:
-        print("[llm_complete] error calling OpenAI:", repr(e), flush=True)
-        raise
+    kwargs = {
+        "model": model,
+        "temperature": 0.5,
+        "messages": messages,
+    }
+    # Only include tool params when tools are actually provided
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    return client.chat.completions.create(**kwargs)
+
 
 def run(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
     tools = [{
