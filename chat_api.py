@@ -2,11 +2,13 @@
 from __future__ import annotations
 import base64, io, os, time, json
 from typing import Any, Dict, List, Tuple
-
+import requests
 import numpy as np
 from PIL import Image
 from flask import Blueprint, request, jsonify
 from runpod_client import run_query
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
+RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT", "")  # e.g. https://api.runpod.ai/v2/<your-endpoint-id>/run
 
 # ---------------- ML optional (Torch/Transformers) ----------------
 # Turn on by setting ENABLE_ML=1 in your environment (Render Settings → Environment)
@@ -104,16 +106,42 @@ def _ensure_clip():
         _clip_proc  = CLIPProcessor.from_pretrained(_MODEL_ID)  # type: ignore
 
 def _embed_text(text: str) -> np.ndarray | None:
-    if not _ML_AVAILABLE or not text or not text.strip():
+    if not text or not text.strip():
         return None
-    _ensure_clip()
-    ins = _clip_proc(text=[text], return_tensors="pt", padding=True, truncation=True)  # type: ignore
-    ins = {k: v.to(_DEVICE) for k, v in ins.items()}  # type: ignore
-    with torch.no_grad():  # type: ignore
-        z = _clip_model.get_text_features(**ins)  # type: ignore
-    z = z / z.norm(p=2, dim=-1, keepdim=True)  # type: ignore
-    return z.squeeze(0).detach().cpu().numpy().astype("float32")  # type: ignore
 
+    # Local ML path (RunPod GPU worker)
+    if _ML_AVAILABLE:
+        _ensure_clip()
+        ins = _clip_proc(text=[text], return_tensors="pt", padding=True, truncation=True)  # type: ignore
+        ins = {k: v.to(_DEVICE) for k, v in ins.items()}  # type: ignore
+        with torch.no_grad():  # type: ignore
+            z = _clip_model.get_text_features(**ins)  # type: ignore
+        z = z / z.norm(p=2, dim=-1, keepdim=True)  # type: ignore
+        return z.squeeze(0).detach().cpu().numpy().astype("float32")  # type: ignore
+
+    # 🔴 Remote ML path (Render → RunPod offload)
+    if RUNPOD_API_KEY and RUNPOD_ENDPOINT:
+        try:
+            headers = {
+                "Authorization": f"Bearer {RUNPOD_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {"input": {"message": text}}
+            r = requests.post(RUNPOD_ENDPOINT, headers=headers, json=payload, timeout=30)
+            r.raise_for_status()
+            out = r.json()
+            # Expect RunPod handler.py to return {"embedding": [..512 floats..]}
+            emb = out.get("output", {}).get("embedding")
+            if isinstance(emb, list) and len(emb) == 512:
+                arr = np.asarray(emb, dtype="float32")
+                n = np.linalg.norm(arr)
+                return arr / max(n, 1e-8)
+        except Exception as e:
+            print("[chat_api] RunPod call failed:", repr(e))
+            return None
+
+    # If neither works
+    return None
 def _embed_image_b64(img_b64: str) -> np.ndarray | None:
     if not _ML_AVAILABLE or not img_b64:
         return None
